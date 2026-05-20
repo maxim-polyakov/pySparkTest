@@ -1,0 +1,14 @@
+services:
+  spark-jupyter:
+    build: .
+    image: pysparktest-jupyter:local
+    container_name: spark_dataspell_container
+    ports:
+      - "8888:8888"
+      - "4040:4040"
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=my_secret_token_123
+    volumes:
+      - ./notebooks:/home/jovyan/work
+    restart: unless-stopped
