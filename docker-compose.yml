@@ -1,14 +1,93 @@
 services:
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-namenode
+    hostname: namenode
+    env_file:
+      - ./hadoop/hadoop.env
+    environment:
+      - CLUSTER_NAME=pysparktest
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+    ports:
+      - "9870:9870"   # NameNode UI
+      - "9000:9000"   # HDFS
+    restart: unless-stopped
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-datanode
+    hostname: datanode
+    env_file:
+      - ./hadoop/hadoop.env
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+    ports:
+      - "9864:9864"   # DataNode UI
+    depends_on:
+      - namenode
+    restart: unless-stopped
+
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-resourcemanager
+    hostname: resourcemanager
+    env_file:
+      - ./hadoop/hadoop.env
+    ports:
+      - "8088:8088"   # YARN UI
+    depends_on:
+      - namenode
+      - datanode
+    restart: unless-stopped
+
+  nodemanager:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-nodemanager
+    hostname: nodemanager
+    env_file:
+      - ./hadoop/hadoop.env
+    ports:
+      - "8042:8042"   # NodeManager UI
+    depends_on:
+      - resourcemanager
+    restart: unless-stopped
+
+  historyserver:
+    image: bde2020/hadoop-historyserver:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-historyserver
+    hostname: historyserver
+    env_file:
+      - ./hadoop/hadoop.env
+    ports:
+      - "8188:8188"   # MapReduce History UI
+    depends_on:
+      - resourcemanager
+      - nodemanager
+    restart: unless-stopped
+
   spark-jupyter:
     build: .
     image: pysparktest-jupyter:local
     container_name: spark_dataspell_container
+    hostname: spark-jupyter
     ports:
       - "8888:8888"
       - "4040:4040"
     environment:
       - JUPYTER_ENABLE_LAB=yes
       - JUPYTER_TOKEN=my_secret_token_123
+      - HADOOP_CONF_DIR=/etc/hadoop
+      - HDFS_URL=hdfs://namenode:9000
     volumes:
       - ./notebooks:/home/jovyan/work
+      - ./hadoop/conf:/etc/hadoop:ro
+    depends_on:
+      - namenode
+      - datanode
+      - resourcemanager
     restart: unless-stopped
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode:
