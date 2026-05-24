@@ -52,5 +52,5 @@ def require_spark(spark=None) -> SparkSession:
     if spark is not None:
         return spark
     raise RuntimeError(
-        "Нет SparkSession. Сначала выполните ячейку 1 (переменная spark)."
+        "Нет SparkSession. Сначала выполните ячейку загрузки данных (переменная spark)."
     )
