@@ -4,6 +4,7 @@ FROM eclipse-temurin:8-jre-jammy AS java8
 FROM eclipse-temurin:17-jre-jammy
 
 ARG MAVEN=https://repo1.maven.org/maven2
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 
 # Java 17 — PySpark/JDBC; Java 8 — только hive CLI (JAVA_HOME=/opt/java-8 в ячейке)
 COPY --from=java8 /opt/java/openjdk /opt/java-8
@@ -28,7 +29,16 @@ RUN pip3 install --upgrade pip setuptools wheel \
     pandas \
     matplotlib \
     scikit-learn \
-    mlflow==2.18.0
+    mlflow==2.18.0 \
+    "protobuf>=4.21,<5" \
+    "pyarrow>=21.0.0" \
+    "transformers>=4.36,<5" \
+    datasets \
+    "accelerate>=1.1.0" \
+    "peft>=0.11.0" \
+    sentencepiece \
+    && pip3 install --no-cache-dir \
+    torch --index-url ${TORCH_INDEX_URL}
 
 RUN python3 -c "import pyspark, os; os.symlink(os.path.dirname(pyspark.__file__), '/opt/spark', target_is_directory=True)"
 
@@ -41,6 +51,7 @@ ENV PYSPARK_PYTHON=python3
 ENV PYSPARK_DRIVER_PYTHON=python3
 ENV JUPYTER_ENABLE_LAB=yes
 ENV POSTGRES_JDBC_JAR=/opt/spark-jars/postgresql-42.7.4.jar
+ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
 RUN useradd -m -s /bin/bash -u 1000 jovyan \
     && chown -R jovyan:jovyan /opt/spark-jars /opt/hive /opt/hadoop-3.2.1 /opt/java-8

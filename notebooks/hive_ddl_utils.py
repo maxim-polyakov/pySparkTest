@@ -97,6 +97,19 @@ def read_spells_hive(
     return spark.sql(f"SELECT * FROM {full_name}")
 
 
+def read_alpaca_hive(
+    spark: SparkSession,
+    hive_db: str = "pysparktest",
+    hive_table: str = "alpaca",
+) -> DataFrame:
+    from spark_utils import require_spark
+
+    spark = require_spark(spark)
+    full_name = f"{hive_db}.{hive_table}"
+    print(f"=== SELECT * FROM {full_name} (Hive metastore) ===")
+    return spark.sql(f"SELECT * FROM {full_name}")
+
+
 def read_spells_parquet(spark, hdfs_path: str) -> DataFrame:
     """Запасной вариант: Parquet по LOCATION таблицы (без SQL)."""
     from spark_utils import require_spark

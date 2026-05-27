@@ -172,6 +172,7 @@ services:
       - ./hadoop/hive.env
     volumes:
       - ./hadoop/scripts/register-spells-table.sh:/scripts/register-spells-table.sh:ro
+      - ./hadoop/scripts/register-alpaca-table.sh:/scripts/register-alpaca-table.sh:ro
     command: /opt/hive/bin/hive --service hiveserver2
     environment:
       HIVE_CORE_CONF_javax_jdo_option_ConnectionURL: "jdbc:postgresql://hive-metastore-postgresql/metastore"
@@ -201,8 +202,8 @@ services:
     image: pysparktest-jupyter:local
     container_name: spark_dataspell_container
     hostname: spark-jupyter
-    mem_limit: 6g
-    memswap_limit: 6g
+    mem_limit: 8g
+    memswap_limit: 8g
     shm_size: 512m
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -231,8 +232,11 @@ services:
       - NO_PROXY=*
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - MLFLOW_SERVE_URI=http://mlflow-serve:5001
+      - MLFLOW_ALPACA_SERVE_URI=http://mlflow-serve-alpaca:5002
+      - MLFLOW_DEEPSEEK_SERVE_URI=http://mlflow-serve-deepseek:5003
       # MLflow/git: в контейнере нет git — не писать длинное предупреждение в ноутбук
       - GIT_PYTHON_REFRESH=quiet
+      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
     command:
       - jupyter
       - lab
@@ -255,6 +259,10 @@ services:
       mlflow:
         condition: service_started
       mlflow-serve:
+        condition: service_started
+      mlflow-serve-alpaca:
+        condition: service_started
+      mlflow-serve-deepseek:
         condition: service_started
     healthcheck:
       test:
@@ -300,6 +308,87 @@ services:
       timeout: 10s
       retries: 20
       start_period: 120s
+    restart: unless-stopped
+
+  mlflow-serve-alpaca:
+    build:
+      context: ./docker/mlflow-serve-alpaca
+    image: pysparktest-mlflow-serve-alpaca
+    container_name: mlflow-serve-alpaca
+    hostname: mlflow-serve-alpaca
+    mem_limit: 4096m
+    memswap_limit: 4096m
+    user: "0:0"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_MODEL_NAME=alpaca-causal-lm
+      - MLFLOW_SERVE_STAGE=Production
+      - MLFLOW_SERVE_PORT=5002
+      - ALPACA_LOCAL_MODEL_DIR=/models/alpaca-distilgpt2
+    entrypoint: /bin/bash
+    command: ["/scripts/mlflow-serve-entrypoint.sh"]
+    volumes:
+      - ./hadoop/scripts/mlflow-serve-entrypoint.sh:/scripts/mlflow-serve-entrypoint.sh:ro
+      - ./hadoop/scripts/alpaca-local-serve.py:/scripts/alpaca-local-serve.py:ro
+      - ./notebooks/models:/models:ro
+    ports:
+      - "5002:5002"
+    depends_on:
+      mlflow:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5002/health', timeout=5)",
+        ]
+      interval: 20s
+      timeout: 15s
+      retries: 30
+      start_period: 300s
+    restart: unless-stopped
+
+  mlflow-serve-deepseek:
+    build:
+      context: ./docker/mlflow-serve-deepseek
+    image: pysparktest-mlflow-serve-deepseek
+    container_name: mlflow-serve-deepseek
+    hostname: mlflow-serve-deepseek
+    mem_limit: 4096m
+    memswap_limit: 4096m
+    user: "0:0"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_MODEL_NAME=deepseek-causal-lm
+      - MLFLOW_SERVE_STAGE=Production
+      - MLFLOW_SERVE_PORT=5003
+      - ALPACA_LOCAL_MODEL_DIR=/models/alpaca-deepseek
+      - HF_TRUST_REMOTE_CODE=1
+    entrypoint: /bin/bash
+    command: ["/scripts/mlflow-serve-entrypoint.sh"]
+    volumes:
+      - ./hadoop/scripts/mlflow-serve-entrypoint.sh:/scripts/mlflow-serve-entrypoint.sh:ro
+      - ./hadoop/scripts/alpaca-local-serve.py:/scripts/alpaca-local-serve.py:ro
+      - ./notebooks/models:/models:ro
+    ports:
+      - "5003:5003"
+    depends_on:
+      mlflow:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5003/health', timeout=5)",
+        ]
+      interval: 20s
+      timeout: 15s
+      retries: 30
+      start_period: 300s
     restart: unless-stopped
 
   mlflow:

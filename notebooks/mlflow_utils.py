@@ -12,7 +12,7 @@ import mlflow
 import numpy as np
 from mlflow.models import infer_signature
 
-__version__ = "2"  # bump при изменении API (для importlib.reload в ноутбуке)
+__version__ = "7"  # bump при изменении API (для importlib.reload в ноутбуке)
 
 SPELL_FEATURE_NAMES = ("mana_cost", "damage")
 MLFLOW_ARTIFACT_ROOT = "mlflow-artifacts:/"
@@ -29,6 +29,230 @@ def mlflow_ui_url() -> str:
 
 def get_serve_uri() -> str:
     return os.environ.get("MLFLOW_SERVE_URI", "http://mlflow-serve:5001")
+
+
+def get_alpaca_serve_uri() -> str:
+    """URI по умолчанию (Docker DNS). Для запросов используйте resolve_alpaca_serve_uri()."""
+    return os.environ.get("MLFLOW_ALPACA_SERVE_URI", "http://mlflow-serve-alpaca:5002")
+
+
+def alpaca_serve_ui_url() -> str:
+    """URL с хоста Windows (порт проброшен в compose)."""
+    return "http://localhost:5002"
+
+
+def wait_for_alpaca_serve(*, max_wait_sec: int = 600, poll_sec: int = 10) -> str:
+    """Ждёт /health Alpaca serve (5002) и возвращает URI."""
+    return _wait_for_lm_serve(
+        resolve_alpaca_serve_uri,
+        max_wait_sec=max_wait_sec,
+        poll_sec=poll_sec,
+        log_container="mlflow-serve-alpaca",
+    )
+
+
+def resolve_alpaca_serve_uri(*, timeout: float = 5.0) -> str:
+    """Первый доступный endpoint serve Alpaca (порт 5002)."""
+    return _resolve_lm_serve_uri(
+        env_var="MLFLOW_ALPACA_SERVE_URI",
+        default_uri="http://mlflow-serve-alpaca:5002",
+        docker_host="mlflow-serve-alpaca",
+        host_port=5002,
+        label="alpaca",
+        timeout=timeout,
+    )
+
+
+def _resolve_lm_serve_uri(
+    *,
+    env_var: str,
+    default_uri: str,
+    docker_host: str,
+    host_port: int,
+    label: str,
+    timeout: float = 5.0,
+) -> str:
+    from urllib.parse import urlparse
+
+    candidates: list[str] = []
+    env_uri = os.environ.get(env_var)
+    if env_uri:
+        candidates.append(env_uri)
+    candidates.extend(
+        [
+            default_uri,
+            f"http://host.docker.internal:{host_port}",
+            f"http://localhost:{host_port}",
+            f"http://127.0.0.1:{host_port}",
+        ]
+    )
+    seen: set[str] = set()
+    for raw in candidates:
+        uri = raw.rstrip("/")
+        if uri in seen or not urlparse(uri).hostname:
+            continue
+        seen.add(uri)
+        try:
+            import urllib.request
+
+            with urllib.request.urlopen(f"{uri}/health", timeout=timeout) as resp:
+                if resp.status == 200:
+                    return uri
+        except (OSError, Exception):
+            continue
+    raise ConnectionError(
+        f"MLflow serve ({label}) недоступен на порту {host_port}. "
+        f"docker compose up -d {docker_host}\n"
+        f"Пробовали: {', '.join(seen)}"
+    )
+
+
+def _wait_for_lm_serve(
+    resolve_fn,
+    *,
+    max_wait_sec: int = 600,
+    poll_sec: int = 10,
+    log_container: str,
+) -> str:
+    import time
+
+    deadline = time.time() + max_wait_sec
+    last_err: Exception | None = None
+    while time.time() < deadline:
+        try:
+            return resolve_fn()
+        except ConnectionError as exc:
+            last_err = exc
+            time.sleep(poll_sec)
+    raise ConnectionError(
+        f"Serve не поднялся за {max_wait_sec}s. docker compose logs {log_container}"
+    ) from last_err
+
+
+def _predict_lm_via_serve(
+    prompt: str,
+    *,
+    resolve_fn,
+    serve_uri: str | None,
+    max_new_tokens: int,
+    timeout: float,
+    log_container: str,
+) -> str:
+    import time
+
+    import requests
+
+    uri = (serve_uri or resolve_fn()).rstrip("/")
+    payloads = [
+        {"inputs": prompt},
+        {"inputs": [prompt]},
+        {
+            "inputs": prompt,
+            "params": {
+                "max_new_tokens": max_new_tokens,
+                "do_sample": False,
+                "repetition_penalty": 1.15,
+                "no_repeat_ngram_size": 3,
+            },
+        },
+    ]
+    last_err: Exception | None = None
+    for attempt in range(5):
+        for payload in payloads:
+            try:
+                resp = requests.post(
+                    f"{uri}/invocations", json=payload, timeout=timeout
+                )
+                resp.raise_for_status()
+                return _parse_serve_response(resp.json())
+            except (requests.RequestException, ValueError) as exc:
+                last_err = exc
+        time.sleep(min(15, 3 * (attempt + 1)))
+    raise ConnectionError(
+        f"MLflow serve не ответил на {uri}/invocations. "
+        f"docker compose logs {log_container}"
+    ) from last_err
+
+
+def get_deepseek_serve_uri() -> str:
+    return os.environ.get(
+        "MLFLOW_DEEPSEEK_SERVE_URI", "http://mlflow-serve-deepseek:5003"
+    )
+
+
+def deepseek_serve_ui_url() -> str:
+    return "http://localhost:5003"
+
+
+def resolve_deepseek_serve_uri(*, timeout: float = 5.0) -> str:
+    return _resolve_lm_serve_uri(
+        env_var="MLFLOW_DEEPSEEK_SERVE_URI",
+        default_uri="http://mlflow-serve-deepseek:5003",
+        docker_host="mlflow-serve-deepseek",
+        host_port=5003,
+        label="deepseek",
+        timeout=timeout,
+    )
+
+
+def wait_for_deepseek_serve(*, max_wait_sec: int = 600, poll_sec: int = 10) -> str:
+    return _wait_for_lm_serve(
+        resolve_deepseek_serve_uri,
+        max_wait_sec=max_wait_sec,
+        poll_sec=poll_sec,
+        log_container="mlflow-serve-deepseek",
+    )
+
+
+def predict_deepseek_via_serve(
+    prompt: str,
+    *,
+    serve_uri: str | None = None,
+    max_new_tokens: int = 80,
+    timeout: float = 300.0,
+) -> str:
+    """Генерация через serve DeepSeek (порт 5003), без загрузки модели в ноутбук."""
+    return _predict_lm_via_serve(
+        prompt,
+        resolve_fn=resolve_deepseek_serve_uri,
+        serve_uri=serve_uri,
+        max_new_tokens=max_new_tokens,
+        timeout=timeout,
+        log_container="mlflow-serve-deepseek",
+    )
+
+
+def predict_alpaca_via_serve(
+    prompt: str,
+    *,
+    serve_uri: str | None = None,
+    max_new_tokens: int = 80,
+    timeout: float = 300.0,
+) -> str:
+    """Генерация через serve Alpaca/distilgpt2 (порт 5002)."""
+    return _predict_lm_via_serve(
+        prompt,
+        resolve_fn=resolve_alpaca_serve_uri,
+        serve_uri=serve_uri,
+        max_new_tokens=max_new_tokens,
+        timeout=timeout,
+        log_container="mlflow-serve-alpaca",
+    )
+
+
+def _parse_serve_response(data: Any) -> str:
+    if isinstance(data, list) and data:
+        return str(data[0])
+    if isinstance(data, dict):
+        if "predictions" in data:
+            return _parse_serve_response(data["predictions"])
+        return str(
+            data.get("generated_text")
+            or data.get("output")
+            or data.get("text")
+            or data
+        )
+    return str(data)
 
 
 def predict_spells_via_serve(
@@ -146,6 +370,8 @@ def log_sklearn_spell_model(
 
 
 REGISTERED_MODEL_NAME = "spells-classifier"
+ALPACA_REGISTERED_MODEL_NAME = "alpaca-causal-lm"
+DEEPSEEK_REGISTERED_MODEL_NAME = "deepseek-causal-lm"
 COMPARE_METRICS = ("test_f1", "test_roc_auc", "accuracy_real", "holdout_f1")
 
 
@@ -217,6 +443,82 @@ def select_best_run(
         f"Не удалось выбрать лучший run: {last_error or 'нет метрик'}. "
         f"Выполните ячейку с test_f1 / accuracy_real."
     )
+
+
+def log_alpaca_causal_lm(
+    model: Any | None = None,
+    tokenizer: Any | None = None,
+    *,
+    model_dir: str | None = None,
+    artifact_path: str = "model",
+) -> None:
+    """Логирует HuggingFace causal LM в текущий MLflow run (flavor transformers)."""
+    # protobuf 5.x + upb ломает mlflow.transformers (FieldDescriptor.label)
+    os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+    import mlflow
+
+    if model_dir:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        model = AutoModelForCausalLM.from_pretrained(model_dir)
+        tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    if model is None or tokenizer is None:
+        raise ValueError("Нужны model+tokenizer или model_dir")
+
+    mlflow.set_tag("task", "alpaca_instruction_lm")
+    if model_dir:
+        mlflow.log_param("local_model_dir", model_dir)
+
+    import mlflow.transformers
+
+    mlflow.transformers.log_model(
+        transformers_model={"model": model, "tokenizer": tokenizer},
+        artifact_path=artifact_path,
+        task="text-generation",
+    )
+    print(f"  → causal LM в MLflow (flavor transformers): '{artifact_path}'")
+
+
+def register_alpaca_from_local(
+    model_dir: str,
+    *,
+    experiment_name: str = "alpaca_llm_finetune",
+    target_stage: str = "Production",
+    model_name: str = ALPACA_REGISTERED_MODEL_NAME,
+) -> str:
+    """Перелогировать локальную папку в MLflow и зарегистрировать (если serve падал без MLmodel)."""
+    setup_mlflow(experiment_name=experiment_name)
+    with mlflow.start_run(run_name="alpaca-causal-lm-reregister") as run:
+        log_alpaca_causal_lm(model_dir=model_dir)
+        run_id = run.info.run_id
+    register_and_promote_run(
+        run_id, model_name=model_name, target_stage=target_stage
+    )
+    print(
+        "Перезапустите serve: docker compose up -d mlflow-serve-alpaca --force-recreate"
+    )
+    return run_id
+
+
+def register_deepseek_from_local(
+    model_dir: str,
+    *,
+    experiment_name: str = "alpaca_llm_finetune",
+    target_stage: str = "Production",
+    model_name: str = DEEPSEEK_REGISTERED_MODEL_NAME,
+) -> str:
+    """Перелогировать DeepSeek в Registry и поднять serve на :5003."""
+    setup_mlflow(experiment_name=experiment_name)
+    with mlflow.start_run(run_name="deepseek-causal-lm-reregister") as run:
+        log_alpaca_causal_lm(model_dir=model_dir)
+        run_id = run.info.run_id
+    register_and_promote_run(
+        run_id, model_name=model_name, target_stage=target_stage
+    )
+    print(
+        "Перезапустите serve: docker compose up -d mlflow-serve-deepseek --force-recreate"
+    )
+    return run_id
 
 
 def register_and_promote_run(

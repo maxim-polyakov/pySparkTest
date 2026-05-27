@@ -1,0 +1,13 @@
+services:
+  spark-jupyter:
+    build:
+      context: .
+      args:
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cu121
+    image: pysparktest-jupyter:gpu
+    gpus: all
+    mem_limit: 12g
+    memswap_limit: 12g
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
