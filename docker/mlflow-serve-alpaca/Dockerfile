@@ -10,3 +10,4 @@ RUN pip install --no-cache-dir \
     --extra-index-url https://download.pytorch.org/whl/cpu
 
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+ENV USE_TF=0

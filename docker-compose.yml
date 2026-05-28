@@ -202,9 +202,9 @@ services:
     image: pysparktest-jupyter:local
     container_name: spark_dataspell_container
     hostname: spark-jupyter
-    mem_limit: 8g
-    memswap_limit: 8g
-    shm_size: 512m
+    mem_limit: 16g
+    memswap_limit: 16g
+    shm_size: 1g
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -223,7 +223,7 @@ services:
       - HIVE_HOME=/opt/hive
       - HADOOP_HOME=/opt/hadoop-3.2.1
       - HADOOP_CONF_DIR=/etc/hadoop
-      - SPARK_DRIVER_MEMORY=1g
+      - SPARK_DRIVER_MEMORY=2g
       # Maven/Ivy в контейнере часто ломается из-за прокси Docker Desktop
       - HTTP_PROXY=
       - HTTPS_PROXY=
@@ -234,9 +234,15 @@ services:
       - MLFLOW_SERVE_URI=http://mlflow-serve:5001
       - MLFLOW_ALPACA_SERVE_URI=http://mlflow-serve-alpaca:5002
       - MLFLOW_DEEPSEEK_SERVE_URI=http://mlflow-serve-deepseek:5003
+      # PyTorch/BLAS CPU parallelism for LLM fine-tuning (i7-8700K: 6C/12T)
+      - OMP_NUM_THREADS=10
+      - MKL_NUM_THREADS=10
+      - OPENBLAS_NUM_THREADS=10
+      - NUMEXPR_NUM_THREADS=10
       # MLflow/git: в контейнере нет git — не писать длинное предупреждение в ноутбук
       - GIT_PYTHON_REFRESH=quiet
       - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+      - USE_TF=0
     command:
       - jupyter
       - lab
@@ -330,6 +336,7 @@ services:
     volumes:
       - ./hadoop/scripts/mlflow-serve-entrypoint.sh:/scripts/mlflow-serve-entrypoint.sh:ro
       - ./hadoop/scripts/alpaca-local-serve.py:/scripts/alpaca-local-serve.py:ro
+      - ./hadoop/scripts/alpaca_prompt_utils.py:/scripts/alpaca_prompt_utils.py:ro
       - ./notebooks/models:/models:ro
     ports:
       - "5002:5002"
@@ -356,8 +363,8 @@ services:
     image: pysparktest-mlflow-serve-deepseek
     container_name: mlflow-serve-deepseek
     hostname: mlflow-serve-deepseek
-    mem_limit: 4096m
-    memswap_limit: 4096m
+    mem_limit: 8g
+    memswap_limit: 8g
     user: "0:0"
     environment:
       - MLFLOW_TRACKING_URI=http://mlflow:5000
@@ -366,11 +373,15 @@ services:
       - MLFLOW_SERVE_PORT=5003
       - ALPACA_LOCAL_MODEL_DIR=/models/alpaca-deepseek
       - HF_TRUST_REMOTE_CODE=1
+      - DEEPSEEK_SERVE_PLAIN=1
+      # DEEPSEEK_SERVE_DEBUG=1 — печать промпта в логах serve
+      # DEEPSEEK_SERVE_PLAIN=0 — safe chat вместо plain (после restart disk jinja может быть старым)
     entrypoint: /bin/bash
     command: ["/scripts/mlflow-serve-entrypoint.sh"]
     volumes:
       - ./hadoop/scripts/mlflow-serve-entrypoint.sh:/scripts/mlflow-serve-entrypoint.sh:ro
       - ./hadoop/scripts/alpaca-local-serve.py:/scripts/alpaca-local-serve.py:ro
+      - ./hadoop/scripts/alpaca_prompt_utils.py:/scripts/alpaca_prompt_utils.py:ro
       - ./notebooks/models:/models:ro
     ports:
       - "5003:5003"

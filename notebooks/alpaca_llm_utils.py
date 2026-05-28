@@ -1,11 +1,14 @@
 """Alpaca: EDA и fine-tuning без pandas (PySpark + HuggingFace)."""
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+
+os.environ.setdefault("USE_TF", "0")
 
 TEXT_COLS = ("instruction", "input", "output", "text")
 
@@ -13,6 +16,76 @@ ALPACA_PREAMBLE = (
     "Below is an instruction that describes a task. Write a response that "
     "appropriately completes the request.\n\n"
 )
+
+# System для DeepSeek chat template (train + serve); без «только программирование».
+DEEPSEEK_ALPACA_SYSTEM = (
+    "Below is an instruction that describes a task. Write a response that "
+    "appropriately completes the request. Answer helpfully; do not refuse "
+    "general knowledge or lifestyle questions."
+)
+
+SAFE_DEEPSEEK_CHAT_TEMPLATE = (
+    "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}"
+    "{% endif %}{{ bos_token }}"
+    "{%- for message in messages %}"
+    "{%- if message['role'] == 'system' %}{{ message['content'] }}\n\n"
+    "{%- elif message['role'] == 'user' %}### Instruction:\n{{ message['content'] }}\n\n"
+    "{%- elif message['role'] == 'assistant' %}### Response:\n{{ message['content'] }}\n"
+    "<|EOT|>\n"
+    "{%- endif %}{%- endfor %}"
+    "{%- if add_generation_prompt %}### Response:\n\n{%- endif %}"
+)
+
+
+def apply_safe_deepseek_chat_template(tokenizer) -> None:
+    if hasattr(tokenizer, "chat_template"):
+        tokenizer.chat_template = SAFE_DEEPSEEK_CHAT_TEMPLATE
+
+
+def _is_deepseek_model(model_name: str | None) -> bool:
+    return bool(model_name and "deepseek" in model_name.lower())
+
+
+def _parse_alpaca_prefix(prefix: str) -> tuple[str, str]:
+    """instruction/input из префикса Alpaca (до ### Response:)."""
+    import re
+
+    body = prefix.strip()
+    if "Below is an instruction" in body and "### Instruction:" in body:
+        body = "### Instruction:" + body.split("### Instruction:", 1)[1]
+    inst_m = re.search(
+        r"### Instruction:\s*\n(.*?)(?=\n### Input:|\n### Response:|\Z)",
+        body,
+        re.DOTALL,
+    )
+    in_m = re.search(
+        r"### Input:\s*\n(.*?)(?=\n### Response:|\Z)", body, re.DOTALL
+    )
+    instruction = inst_m.group(1).strip() if inst_m else ""
+    input_text = in_m.group(1).strip() if in_m else ""
+    return instruction, input_text
+
+
+def alpaca_text_to_chat_messages(text: str) -> list[dict[str, str]]:
+    """Полный пример Alpaca → messages для apply_chat_template (DeepSeek)."""
+    text = text.strip()
+    response = ""
+    if "### Response:\n" in text:
+        prefix, response = text.split("### Response:\n", 1)
+        response = response.strip()
+    else:
+        prefix = text
+    instruction, input_text = _parse_alpaca_prefix(prefix)
+    user = instruction
+    if input_text:
+        user += f"\n\n### Input:\n{input_text}"
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": DEEPSEEK_ALPACA_SYSTEM},
+        {"role": "user", "content": user},
+    ]
+    if response:
+        messages.append({"role": "assistant", "content": response})
+    return messages
 
 DEFAULT_DISTILGPT2_MODEL = "distilgpt2"
 DEFAULT_DISTILGPT2_OUTPUT_DIR = "/home/jovyan/work/models/alpaca-distilgpt2"
@@ -100,8 +173,6 @@ def configure_cpu_threads(cpu_threads: int | None = None) -> None:
     if not cpu_threads or cpu_threads < 1:
         return
 
-    import os
-
     threads = str(cpu_threads)
     os.environ["OMP_NUM_THREADS"] = threads
     os.environ["MKL_NUM_THREADS"] = threads
@@ -144,6 +215,39 @@ def prompt_for_generation_from_row(row) -> str:
         getattr(row, "instruction", "") or "",
         input_text=getattr(row, "input", "") or "",
     )
+
+
+def reference_from_alpaca_text(text: str) -> str:
+    """Эталонный output из поля text датасета Alpaca."""
+    marker = "### Response:\n"
+    if marker in text:
+        return text.split(marker, 1)[1].strip()
+    return ""
+
+
+def collect_eval_prompt_pairs(
+    eval_df: DataFrame,
+    *,
+    max_samples: int = 20,
+    text_column: str = "text",
+) -> list[tuple[str, str]]:
+    """Пары (prompt, reference) из eval Spark DataFrame для метрик serve."""
+    from types import SimpleNamespace
+
+    pairs: list[tuple[str, str]] = []
+    rows = eval_df.select(text_column).limit(max_samples).collect()
+    for row in rows:
+        text = (getattr(row, text_column, None) or "").strip()
+        if not text:
+            continue
+        ref = reference_from_alpaca_text(text)
+        if not ref:
+            continue
+        prompt = prompt_for_generation_from_row(
+            SimpleNamespace(text=text, instruction="", input="", output="")
+        )
+        pairs.append((prompt, ref))
+    return pairs
 
 
 def with_text_lengths(sdf: DataFrame) -> DataFrame:
@@ -255,6 +359,7 @@ def spark_texts_to_tokenized(
     text_column: str = "text",
     *,
     max_length: int | None = None,
+    model_name: str | None = None,
 ):
     """Spark → torch Dataset для Trainer (без huggingface `datasets`/pyarrow).
 
@@ -265,7 +370,47 @@ def spark_texts_to_tokenized(
     train_texts = [r[text_column] for r in train_df.collect()]
     eval_texts = [r[text_column] for r in eval_df.collect()]
 
+    use_chat = _is_deepseek_model(model_name) and hasattr(
+        tokenizer, "apply_chat_template"
+    )
+    if use_chat:
+        apply_safe_deepseek_chat_template(tokenizer)
+
     def _encode(texts: list[str]):
+        if use_chat:
+            cap = max_length
+            if cap is None:
+                cap = getattr(tokenizer, "model_max_length", None) or 1024
+                if cap > 100_000:
+                    cap = 1024
+            ids_list: list[list[int]] = []
+            mask_list: list[list[int]] = []
+            for text in texts:
+                messages = alpaca_text_to_chat_messages(text)
+                row_ids = tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=True,
+                    add_generation_prompt=False,
+                    truncation=True,
+                    max_length=cap,
+                )
+                if isinstance(row_ids, dict):
+                    ids_list.append(list(row_ids["input_ids"]))
+                    mask_list.append(
+                        list(row_ids.get("attention_mask") or [1] * len(row_ids["input_ids"]))
+                    )
+                else:
+                    ids_list.append(list(row_ids))
+                    mask_list.append([1] * len(row_ids))
+            if max_length is not None:
+                pad_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+                for i, seq in enumerate(ids_list):
+                    if len(seq) < max_length:
+                        pad_len = max_length - len(seq)
+                        ids_list[i] = seq + [pad_id] * pad_len
+                        mask_list[i] = mask_list[i] + [0] * pad_len
+            return {"input_ids": ids_list, "attention_mask": mask_list}
+
         if max_length is None:
             cap = getattr(tokenizer, "model_max_length", None) or 1024
             if cap > 100_000:
@@ -310,6 +455,8 @@ def _load_causal_lm(
     from transformers import AutoModelForCausalLM
 
     load_kw: dict[str, Any] = {"trust_remote_code": trust_remote_code}
+    if not torch.cuda.is_available():
+        load_kw["low_cpu_mem_usage"] = True
     if torch.cuda.is_available():
         load_kw["torch_dtype"] = torch.float16
         try:
@@ -383,6 +530,7 @@ def train_causal_lm(
         AutoTokenizer,
         DataCollatorForLanguageModeling,
         Trainer,
+        TrainerCallback,
         TrainingArguments,
     )
 
@@ -392,6 +540,13 @@ def train_causal_lm(
     register_and_promote_run = mu.register_and_promote_run
 
     setup_mlflow(experiment_name=experiment_name)
+
+    import gc
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     print(
         "PyTorch device:",
         "cuda" if torch.cuda.is_available() else "cpu",
@@ -424,7 +579,8 @@ def train_causal_lm(
     model.config.pad_token_id = tokenizer.pad_token_id
     collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    eval_steps = max(10, max_steps // 4)
+    logging_steps = max(1, min(10, max_steps))
+    eval_steps = max(1, min(max_steps, max(1, max_steps // 4)))
     args = TrainingArguments(
         output_dir=output_dir,
         max_steps=max_steps,
@@ -433,7 +589,8 @@ def train_causal_lm(
         learning_rate=learning_rate,
         eval_strategy="steps",
         eval_steps=eval_steps,
-        logging_steps=10,
+        logging_steps=logging_steps,
+        logging_first_step=True,
         save_steps=max_steps,
         save_total_limit=1,
         report_to="none",
@@ -442,12 +599,33 @@ def train_causal_lm(
         dataloader_num_workers=0,
     )
 
+    class PrintLossCallback(TrainerCallback):
+        """Печать train/eval loss в stdout на каждом logging step."""
+
+        def on_log(self, args, state, control, logs=None, **kwargs):  # noqa: ANN001
+            if not logs:
+                return
+            parts: list[str] = []
+            if "loss" in logs:
+                parts.append(f"train_loss={float(logs['loss']):.4f}")
+            if "eval_loss" in logs:
+                parts.append(f"eval_loss={float(logs['eval_loss']):.4f}")
+            if "learning_rate" in logs:
+                parts.append(f"lr={float(logs['learning_rate']):.2e}")
+            if parts:
+                step = int(state.global_step)
+                print(
+                    f"[step {step}/{args.max_steps}] " + ", ".join(parts),
+                    flush=True,
+                )
+
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=train_tok,
         eval_dataset=eval_tok,
         data_collator=collator,
+        callbacks=[PrintLossCallback()],
     )
 
     with mlflow.start_run(run_name=model_name) as run:
@@ -463,16 +641,41 @@ def train_causal_lm(
                 "cpu_threads": cpu_threads,
             }
         )
-        result = trainer.train()
-        mlflow.log_metrics(
-            {k: float(v) for k, v in trainer.evaluate().items() if isinstance(v, (int, float))}
+        print(
+            f"train: start (max_steps={max_steps}, logging every {logging_steps} step(s), "
+            f"eval every {eval_steps} step(s))"
         )
-        mlflow.log_metric("train_loss", float(result.training_loss))
-        if use_lora and hasattr(model, "merge_and_unload"):
-            model = model.merge_and_unload()
-        trainer.save_model(output_dir)
+        result = trainer.train()
+        train_loss = float(result.training_loss)
+        print(f"train: done — mean train_loss={train_loss:.4f}")
+        print("evaluate: start")
+        eval_metrics = trainer.evaluate()
+        eval_loss = eval_metrics.get("eval_loss")
+        for key, value in eval_metrics.items():
+            if isinstance(value, (int, float)):
+                print(f"  {key}={float(value):.4f}")
+        mlflow.log_metrics(
+            {k: float(v) for k, v in eval_metrics.items() if isinstance(v, (int, float))}
+        )
+        print("evaluate: done")
+        mlflow.log_metric("train_loss", train_loss)
+        if eval_loss is not None:
+            mlflow.log_metric("eval_loss", float(eval_loss))
+        print("save: start")
+        if use_lora:
+            trainer.save_model(output_dir)
+        else:
+            model.save_pretrained(output_dir, safe_serialization=True)
         tokenizer.save_pretrained(output_dir)
-        log_alpaca_causal_lm(model_dir=output_dir)
+        print("save: done")
+        print("mlflow log_model: start")
+        log_alpaca_causal_lm(
+            model=None if use_lora else model,
+            tokenizer=None if use_lora else tokenizer,
+            model_dir=output_dir,
+            lightweight=use_lora,
+        )
+        print("mlflow log_model: done")
         run_id = run.info.run_id
 
     print(f"Локально: {output_dir}")
@@ -572,15 +775,63 @@ def generate_sample(
     *,
     max_new_tokens: int = 80,
     do_sample: bool = False,
+    max_time: float | None = 120.0,
+    allow_large_model: bool = False,
 ) -> str:
     """Генерация в формате Alpaca; обрезка по следующему ###."""
+    from pathlib import Path
+
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    model = AutoModelForCausalLM.from_pretrained(model_dir)
+    path = Path(model_dir)
+    adapter = path / "adapter_model.safetensors"
+    checkpoint = path / "checkpoint-1"
+    checkpoint_adapter = checkpoint / "adapter_model.safetensors"
+    if (
+        (not adapter.exists() or adapter.stat().st_size < 1024)
+        and checkpoint_adapter.exists()
+        and checkpoint_adapter.stat().st_size >= 1024
+    ):
+        path = checkpoint
+
+    if (
+        not allow_large_model
+        and ("deepseek" in str(path).lower() or (path / "adapter_config.json").is_file())
+    ):
+        raise RuntimeError(
+            "Локальная генерация DeepSeek/LoRA в Jupyter может уронить kernel. "
+            "Используйте predict_deepseek_via_serve(..., serve_uri=uri) через порт 5003 "
+            "или явно передайте allow_large_model=True."
+        )
+
+    cache_key = str(path.resolve())
+    cache = globals().setdefault("_GENERATION_MODEL_CACHE", {})
+    if cache_key in cache:
+        tokenizer, model, device = cache[cache_key]
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(cache_key, trust_remote_code=True)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+
+        if (path / "adapter_config.json").is_file():
+            from peft import PeftConfig, PeftModel
+
+            peft_cfg = PeftConfig.from_pretrained(cache_key)
+            base = AutoModelForCausalLM.from_pretrained(
+                peft_cfg.base_model_name_or_path,
+                trust_remote_code=True,
+            )
+            model = PeftModel.from_pretrained(base, cache_key)
+        else:
+            model = AutoModelForCausalLM.from_pretrained(cache_key, trust_remote_code=True)
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model.to(device)
+        model.eval()
+        cache[cache_key] = (tokenizer, model, device)
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
     gen_kw: dict = {
         "max_new_tokens": max_new_tokens,
@@ -589,9 +840,12 @@ def generate_sample(
         "repetition_penalty": 1.15,
         "no_repeat_ngram_size": 3,
     }
+    if max_time is not None:
+        gen_kw["max_time"] = max_time
     if do_sample:
         gen_kw.update(do_sample=True, temperature=0.7, top_p=0.9)
-    out = model.generate(**inputs, **gen_kw)
+    with torch.no_grad():
+        out = model.generate(**inputs, **gen_kw)
     text = tokenizer.decode(out[0], skip_special_tokens=True)
     if text.startswith(prompt):
         text = text[len(prompt) :].lstrip()

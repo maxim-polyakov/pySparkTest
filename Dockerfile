@@ -6,6 +6,9 @@ FROM eclipse-temurin:17-jre-jammy
 ARG MAVEN=https://repo1.maven.org/maven2
 ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 
+ENV PIP_NO_INPUT=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
 # Java 17 — PySpark/JDBC; Java 8 — только hive CLI (JAVA_HOME=/opt/java-8 в ячейке)
 COPY --from=java8 /opt/java/openjdk /opt/java-8
 COPY --from=hive-dist /opt/hive /opt/hive
@@ -22,22 +25,23 @@ RUN mkdir -p /opt/spark-jars \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --upgrade pip setuptools wheel \
-    && pip3 install --no-cache-dir \
+RUN python3 -m pip install --no-cache-dir --ignore-installed \
     pyspark==3.5.4 \
     jupyterlab==4.3.4 \
     pandas \
     matplotlib \
     scikit-learn \
     mlflow==2.18.0 \
+    "numpy>=1.26,<2" \
     "protobuf>=4.21,<5" \
-    "pyarrow>=21.0.0" \
+    "pyarrow>=18,<19" \
     "transformers>=4.36,<5" \
-    datasets \
     "accelerate>=1.1.0" \
     "peft>=0.11.0" \
     sentencepiece \
-    && pip3 install --no-cache-dir \
+    rouge-score \
+    sacrebleu \
+    && python3 -m pip install --no-cache-dir --ignore-installed \
     torch --index-url ${TORCH_INDEX_URL}
 
 RUN python3 -c "import pyspark, os; os.symlink(os.path.dirname(pyspark.__file__), '/opt/spark', target_is_directory=True)"
@@ -52,6 +56,7 @@ ENV PYSPARK_DRIVER_PYTHON=python3
 ENV JUPYTER_ENABLE_LAB=yes
 ENV POSTGRES_JDBC_JAR=/opt/spark-jars/postgresql-42.7.4.jar
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+ENV USE_TF=0
 
 RUN useradd -m -s /bin/bash -u 1000 jovyan \
     && chown -R jovyan:jovyan /opt/spark-jars /opt/hive /opt/hadoop-3.2.1 /opt/java-8

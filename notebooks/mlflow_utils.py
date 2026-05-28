@@ -12,10 +12,127 @@ import mlflow
 import numpy as np
 from mlflow.models import infer_signature
 
-__version__ = "7"  # bump при изменении API (для importlib.reload в ноутбуке)
+__version__ = "9"  # bump при изменении API (для importlib.reload в ноутбуке)
+
+REFUSAL_PATTERNS = (
+    r"i['\u2019]?m sorry",
+    r"i cannot\b",
+    r"i can['\u2019]t\b",
+    r"as an ai\b",
+    r"outside of my area",
+    r"programming-related",
+    r"only answer questions related to computer science",
+    r"do not have specific advice",
+)
 
 SPELL_FEATURE_NAMES = ("mana_cost", "damage")
 MLFLOW_ARTIFACT_ROOT = "mlflow-artifacts:/"
+
+
+def _resolve_lm_model_dir(model_dir: str) -> str:
+    """Resolve notebook path to the mounted serve path and prefer a valid LoRA checkpoint."""
+    from pathlib import Path
+
+    path = Path(model_dir)
+    if not path.exists() and path.parts:
+        mounted = Path("/models") / path.name
+        if mounted.exists():
+            path = mounted
+
+    merged = path / "merged"
+    if (merged / "config.json").is_file():
+        return str(merged)
+
+    def _valid_adapter(directory: Path) -> bool:
+        adapter = directory / "adapter_model.safetensors"
+        return adapter.is_file() and adapter.stat().st_size >= 1024
+
+    if _valid_adapter(path):
+        return str(path)
+
+    checkpoints = sorted(
+        (p for p in path.glob("checkpoint-*") if p.is_dir()),
+        key=lambda p: int(p.name.partition("-")[2] or "0"),
+    )
+    for ckpt in reversed(checkpoints):
+        if _valid_adapter(ckpt):
+            return str(ckpt)
+    return str(path)
+
+
+class LocalCausalLmPyFunc(mlflow.pyfunc.PythonModel):
+    """MLflow pyfunc wrapper that serves a local HF folder mounted into Docker."""
+
+    def __init__(self, model_dir: str, *, trust_remote_code: bool = True):
+        self.model_dir = model_dir
+        self.trust_remote_code = trust_remote_code
+        self._model = None
+        self._tokenizer = None
+        self._device = None
+
+    def load_context(self, context) -> None:  # noqa: ANN001
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        model_dir = _resolve_lm_model_dir(self.model_dir)
+        self._tokenizer = AutoTokenizer.from_pretrained(
+            model_dir, trust_remote_code=self.trust_remote_code
+        )
+        if self._tokenizer.pad_token is None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
+
+        if os.path.isfile(os.path.join(model_dir, "adapter_config.json")):
+            from peft import PeftConfig, PeftModel
+
+            peft_cfg = PeftConfig.from_pretrained(model_dir)
+            base = AutoModelForCausalLM.from_pretrained(
+                peft_cfg.base_model_name_or_path,
+                trust_remote_code=self.trust_remote_code,
+            )
+            self._model = PeftModel.from_pretrained(base, model_dir)
+        else:
+            self._model = AutoModelForCausalLM.from_pretrained(
+                model_dir, trust_remote_code=self.trust_remote_code
+            )
+
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._model.to(self._device)
+        self._model.eval()
+
+    def predict(self, context, model_input):  # noqa: ANN001, ANN201
+        import pandas as pd
+        import torch
+
+        if self._model is None or self._tokenizer is None:
+            self.load_context(context)
+
+        if isinstance(model_input, pd.DataFrame):
+            prompts = model_input.iloc[:, 0].astype(str).tolist()
+        elif isinstance(model_input, list):
+            prompts = [str(x) for x in model_input]
+        else:
+            prompts = [str(model_input)]
+
+        outputs: list[str] = []
+        for prompt in prompts:
+            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._device)
+            with torch.no_grad():
+                out = self._model.generate(
+                    **inputs,
+                    max_new_tokens=80,
+                    pad_token_id=self._tokenizer.pad_token_id,
+                    eos_token_id=self._tokenizer.eos_token_id,
+                    repetition_penalty=1.15,
+                    no_repeat_ngram_size=3,
+                )
+            text = self._tokenizer.decode(out[0], skip_special_tokens=True)
+            if text.startswith(prompt):
+                text = text[len(prompt) :].lstrip()
+            for stop in ("\n\n###", "\n### Instruction", "\n### Input"):
+                if stop in text:
+                    text = text.split(stop, 1)[0].rstrip()
+            outputs.append(text)
+        return outputs
 
 
 def get_tracking_uri() -> str:
@@ -240,6 +357,197 @@ def predict_alpaca_via_serve(
     )
 
 
+def is_refusal_response(text: str) -> bool:
+    import re
+
+    lowered = (text or "").lower()
+    return any(re.search(pat, lowered) for pat in REFUSAL_PATTERNS)
+
+
+def ensure_serve_metrics_deps(*, auto_install: bool = True) -> None:
+    """Проверить/установить rouge-score и sacrebleu (import: rouge_score, sacrebleu)."""
+    import importlib
+    import subprocess
+    import sys
+
+    required = (("rouge_score", "rouge-score"), ("sacrebleu", "sacrebleu"))
+    missing_pkgs: list[str] = []
+    for mod, pkg in required:
+        try:
+            importlib.import_module(mod)
+        except ImportError:
+            missing_pkgs.append(pkg)
+
+    if not missing_pkgs:
+        return
+
+    if auto_install:
+        print(f"Installing: {', '.join(missing_pkgs)} ...", flush=True)
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "-q", *missing_pkgs],
+        )
+        import site
+
+        user_site = site.getusersitepackages()
+        if user_site and user_site not in sys.path:
+            site.addsitedir(user_site)
+        importlib.invalidate_caches()
+        still_missing: list[str] = []
+        for mod, pkg in required:
+            try:
+                importlib.import_module(mod)
+            except ImportError:
+                still_missing.append(pkg)
+        if not still_missing:
+            print("OK:", ", ".join(m for m, _ in required), flush=True)
+            return
+        missing_pkgs = still_missing
+
+    raise ImportError(
+        "Нет пакетов для метрик генерации: "
+        f"{', '.join(missing_pkgs)}.\n"
+        "В ноутбуке выполните:\n"
+        "  %pip install rouge-score sacrebleu\n"
+        "  Kernel → Restart\n"
+        "Импорт в Python: `from rouge_score import rouge_scorer` и `import sacrebleu` "
+        "(не `import rouge-score`)."
+    )
+
+
+def compute_generation_metrics(
+    predictions: list[str],
+    references: list[str],
+) -> dict[str, float]:
+    """ROUGE-L, chrF, refusal_rate, avg_gen_chars по спискам pred/ref."""
+    if len(predictions) != len(references):
+        raise ValueError(
+            f"predictions ({len(predictions)}) и references ({len(references)}) "
+            "должны быть одинаковой длины"
+        )
+    if not predictions:
+        raise ValueError("Пустой список для метрик генерации")
+
+    ensure_serve_metrics_deps()
+    from rouge_score import rouge_scorer
+    import sacrebleu
+
+    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
+    rouge_l = 0.0
+    for pred, ref in zip(predictions, references):
+        if not (ref or "").strip():
+            continue
+        rouge_l += scorer.score(ref, pred)["rougeL"].fmeasure
+    rouge_l /= len(predictions)
+
+    chrf = sacrebleu.corpus_chrf(
+        predictions,
+        [references],
+        word_order=2,
+    ).score
+
+    refusals = sum(1 for p in predictions if is_refusal_response(p))
+    gen_chars = [len(p or "") for p in predictions]
+
+    return {
+        "serve_rouge_l": float(rouge_l),
+        "serve_chrf": float(chrf),
+        "serve_refusal_rate": float(refusals / len(predictions)),
+        "serve_avg_gen_chars": float(sum(gen_chars) / len(gen_chars)),
+        "serve_eval_samples": float(len(predictions)),
+    }
+
+
+def evaluate_deployed_via_serve(
+    prompt_reference_pairs: list[tuple[str, str]],
+    *,
+    predict_fn=None,
+    serve_uri: str | None = None,
+    max_new_tokens: int = 128,
+    timeout: float = 300.0,
+    max_samples: int | None = 20,
+    show_examples: int = 3,
+    mlflow_log: bool = True,
+    experiment_name: str = "alpaca_llm_finetune",
+    run_name: str | None = "serve_generation_eval",
+) -> dict[str, float]:
+    """Метрики генерации задеплоенной модели (HTTP serve :5002/:5003).
+
+    prompt_reference_pairs: (prompt, эталонный output).
+    """
+    ensure_serve_metrics_deps()
+    if predict_fn is None:
+        predict_fn = predict_deepseek_via_serve
+
+    pairs = [
+        (p.strip(), r.strip())
+        for p, r in prompt_reference_pairs
+        if (p or "").strip() and (r or "").strip()
+    ]
+    if max_samples is not None:
+        pairs = pairs[: max(1, int(max_samples))]
+    if not pairs:
+        raise ValueError("Нет пар (prompt, reference) для оценки serve")
+
+    predictions: list[str] = []
+    references: list[str] = []
+    print(f"serve eval: {len(pairs)} пример(ов), max_new_tokens={max_new_tokens}")
+    for i, (prompt, reference) in enumerate(pairs, start=1):
+        pred = predict_fn(
+            prompt,
+            serve_uri=serve_uri,
+            max_new_tokens=max_new_tokens,
+            timeout=timeout,
+        )
+        predictions.append(pred)
+        references.append(reference)
+        print(f"  [{i}/{len(pairs)}] done", flush=True)
+
+    metrics = compute_generation_metrics(predictions, references)
+    print("\n=== Serve generation metrics ===")
+    for key, value in metrics.items():
+        if key == "serve_eval_samples":
+            print(f"  {key}: {int(value)}")
+        else:
+            print(f"  {key}: {value:.4f}")
+
+    n_show = min(show_examples, len(pairs))
+    if n_show:
+        print(f"\n=== Примеры (первые {n_show}) ===")
+        for i in range(n_show):
+            print(f"--- [{i + 1}] reference ---\n{references[i][:400]}")
+            print(f"--- [{i + 1}] prediction ---\n{predictions[i][:400]}\n")
+
+    if mlflow_log:
+        setup_mlflow(experiment_name=experiment_name)
+        with mlflow.start_run(run_name=run_name):
+            mlflow.log_metrics(metrics)
+            mlflow.set_tag("task", "serve_generation_eval")
+            if serve_uri:
+                mlflow.log_param("serve_uri", serve_uri)
+            mlflow.log_param("max_new_tokens", max_new_tokens)
+            print(f"  → метрики в MLflow run: {run_name}")
+
+    return metrics
+
+
+def evaluate_deployed_deepseek(
+    prompt_reference_pairs: list[tuple[str, str]],
+    **kwargs: Any,
+) -> dict[str, float]:
+    """Оценка DeepSeek serve (:5003)."""
+    kwargs.setdefault("predict_fn", predict_deepseek_via_serve)
+    return evaluate_deployed_via_serve(prompt_reference_pairs, **kwargs)
+
+
+def evaluate_deployed_alpaca(
+    prompt_reference_pairs: list[tuple[str, str]],
+    **kwargs: Any,
+) -> dict[str, float]:
+    """Оценка distilgpt2 serve (:5002)."""
+    kwargs.setdefault("predict_fn", predict_alpaca_via_serve)
+    return evaluate_deployed_via_serve(prompt_reference_pairs, **kwargs)
+
+
 def _parse_serve_response(data: Any) -> str:
     if isinstance(data, list) and data:
         return str(data[0])
@@ -451,17 +759,38 @@ def log_alpaca_causal_lm(
     *,
     model_dir: str | None = None,
     artifact_path: str = "model",
+    lightweight: bool = False,
 ) -> None:
     """Логирует HuggingFace causal LM в текущий MLflow run (flavor transformers)."""
     # protobuf 5.x + upb ломает mlflow.transformers (FieldDescriptor.label)
     os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
     import mlflow
 
-    if model_dir:
+    if lightweight:
+        if not model_dir:
+            raise ValueError("Для lightweight-логирования нужен model_dir")
+        mlflow.set_tag("task", "alpaca_instruction_lm")
+        mlflow.log_param("local_model_dir", model_dir)
+        mlflow.pyfunc.log_model(
+            artifact_path=artifact_path,
+            python_model=LocalCausalLmPyFunc(model_dir),
+            pip_requirements=[
+                "mlflow==2.18.0",
+                "transformers>=4.36,<5",
+                "torch",
+                "peft>=0.11.0",
+                "pandas",
+            ],
+        )
+        _assert_mlmodel_logged(artifact_path)
+        print(f"  → causal LM в MLflow (local pyfunc): '{artifact_path}'")
+        return
+
+    if model_dir and (model is None or tokenizer is None):
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        model = AutoModelForCausalLM.from_pretrained(model_dir)
-        tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        model = AutoModelForCausalLM.from_pretrained(model_dir, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
     if model is None or tokenizer is None:
         raise ValueError("Нужны model+tokenizer или model_dir")
 
@@ -476,7 +805,21 @@ def log_alpaca_causal_lm(
         artifact_path=artifact_path,
         task="text-generation",
     )
+    _assert_mlmodel_logged(artifact_path)
     print(f"  → causal LM в MLflow (flavor transformers): '{artifact_path}'")
+
+
+def _assert_mlmodel_logged(artifact_path: str = "model") -> None:
+    run = mlflow.active_run()
+    if run is not None:
+        from mlflow.tracking import MlflowClient
+
+        client = MlflowClient()
+        mlmodel_path = f"{artifact_path}/MLmodel"
+        if not any(a.path == mlmodel_path for a in client.list_artifacts(run.info.run_id, artifact_path)):
+            raise RuntimeError(
+                f"MLflow не создал {mlmodel_path}; Registry/serve получат пустую модель."
+            )
 
 
 def register_alpaca_from_local(
@@ -510,7 +853,7 @@ def register_deepseek_from_local(
     """Перелогировать DeepSeek в Registry и поднять serve на :5003."""
     setup_mlflow(experiment_name=experiment_name)
     with mlflow.start_run(run_name="deepseek-causal-lm-reregister") as run:
-        log_alpaca_causal_lm(model_dir=model_dir)
+        log_alpaca_causal_lm(model_dir=model_dir, lightweight=True)
         run_id = run.info.run_id
     register_and_promote_run(
         run_id, model_name=model_name, target_stage=target_stage
