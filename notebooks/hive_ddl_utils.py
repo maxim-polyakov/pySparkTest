@@ -110,6 +110,47 @@ def read_alpaca_hive(
     return spark.sql(f"SELECT * FROM {full_name}")
 
 
+def read_movielens_hive(
+    spark: SparkSession,
+    *,
+    hive_db: str = "pysparktest",
+    movies_table: str = "movies",
+    ratings_table: str = "ratings",
+) -> tuple[DataFrame, DataFrame]:
+    """movies и ratings из Hive (колонки movieId/userId, rating → double)."""
+    from pyspark.sql import Column, functions as F
+
+    from spark_utils import require_spark
+
+    spark = require_spark(spark)
+
+    def _col(df: DataFrame, *names: str) -> Column:
+        lower = {c.lower(): c for c in df.columns}
+        for name in names:
+            if name in df.columns:
+                return F.col(name)
+            if name.lower() in lower:
+                return F.col(lower[name.lower()])
+        raise KeyError(f"Нет колонки {names} в {df.columns}")
+
+    movies_raw = spark.table(f"{hive_db}.{movies_table}")
+    ratings_raw = spark.table(f"{hive_db}.{ratings_table}")
+
+    movies = movies_raw.select(
+        _col(movies_raw, "movieId", "movieid").alias("movieId"),
+        _col(movies_raw, "title").alias("title"),
+        _col(movies_raw, "genres").alias("genres"),
+    )
+    ratings = ratings_raw.select(
+        _col(ratings_raw, "userId", "userid").alias("userId"),
+        _col(ratings_raw, "movieId", "movieid").alias("movieId"),
+        _col(ratings_raw, "rating").cast("double").alias("rating"),
+        _col(ratings_raw, "timestamp").alias("timestamp"),
+    )
+    print(f"=== Hive: {hive_db}.{movies_table}, {hive_db}.{ratings_table} ===")
+    return movies, ratings
+
+
 def read_spells_parquet(spark, hdfs_path: str) -> DataFrame:
     """Запасной вариант: Parquet по LOCATION таблицы (без SQL)."""
     from spark_utils import require_spark

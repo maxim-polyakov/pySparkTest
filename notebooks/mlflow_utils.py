@@ -12,7 +12,7 @@ import mlflow
 import numpy as np
 from mlflow.models import infer_signature
 
-__version__ = "9"  # bump при изменении API (для importlib.reload в ноутбуке)
+__version__ = "12"  # bump при изменении API (для importlib.reload в ноутбуке)
 
 REFUSAL_PATTERNS = (
     r"i['\u2019]?m sorry",
@@ -27,6 +27,16 @@ REFUSAL_PATTERNS = (
 
 SPELL_FEATURE_NAMES = ("mana_cost", "damage")
 MLFLOW_ARTIFACT_ROOT = "mlflow-artifacts:/"
+
+REGISTERED_MODEL_NAME = "spells-classifier"
+ALPACA_REGISTERED_MODEL_NAME = "alpaca-causal-lm"
+DEEPSEEK_REGISTERED_MODEL_NAME = "deepseek-causal-lm"
+MOVIELENS_REGISTERED_MODEL_NAME = "movielens-als"
+MOVIELENS_EXPERIMENT = "movielens_recommendations"
+COMPARE_METRICS = ("test_f1", "test_roc_auc", "accuracy_real", "holdout_f1")
+
+# re-export: старые артефакты cloudpickle ссылаются на mlflow_utils.MovielensAlsPyFunc
+from movielens_als_pyfunc import MovielensAlsPyFunc  # noqa: E402, F401
 
 
 def _resolve_lm_model_dir(model_dir: str) -> str:
@@ -580,6 +590,40 @@ def predict_spells_via_serve(
     return resp.json()
 
 
+def get_movielens_serve_uri() -> str:
+    return os.environ.get(
+        "MLFLOW_MOVIELENS_SERVE_URI", "http://mlflow-serve-movielens:5004"
+    )
+
+
+def movielens_serve_host_url() -> str:
+    return get_movielens_serve_uri().replace(
+        "http://mlflow-serve-movielens:5004", "http://localhost:5004"
+    )
+
+
+def predict_movielens_via_serve(
+    user_ids: list[int],
+    *,
+    k: int = 10,
+    serve_uri: str | None = None,
+    timeout: float = 120.0,
+) -> Any:
+    """Топ-K рекомендаций через MLflow serve (POST /invocations)."""
+    import requests
+
+    uri = (serve_uri or get_movielens_serve_uri()).rstrip("/")
+    payload = {
+        "dataframe_split": {
+            "columns": ["userId", "k"],
+            "data": [[int(uid), int(k)] for uid in user_ids],
+        }
+    }
+    resp = requests.post(f"{uri}/invocations", json=payload, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def _experiment_needs_recreate(artifact_location: str | None) -> bool:
     """Пути вида /mlflow/artifacts/N — только на сервере, Jupyter пишет локально и падает."""
     if not artifact_location:
@@ -649,6 +693,84 @@ def setup_mlflow(experiment_name: str = "spells_classifiers") -> str:
     return uri
 
 
+def log_movielens_als_model(
+    als_model: Any,
+    *,
+    metrics: dict[str, float] | None = None,
+    params: dict[str, Any] | None = None,
+    artifact_path: str = "model",
+) -> None:
+    """Сохраняет ALS (user/item factors) как pyfunc для Registry и serve."""
+    import tempfile
+    from pathlib import Path
+
+    import pandas as pd
+
+    from movielens_als_pyfunc import MovielensAlsPyFunc
+
+    pyfunc_module = Path(__file__).resolve().parent / "movielens_als_pyfunc.py"
+
+    for key, value in (params or {}).items():
+        mlflow.log_param(key, str(value))
+    for key, value in (metrics or {}).items():
+        mlflow.log_metric(key, float(value))
+
+    mlflow.set_tag("task", "movielens_als_recommendations")
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        user_path = td_path / "user_factors.parquet"
+        item_path = td_path / "item_factors.parquet"
+        als_model.userFactors.toPandas().to_parquet(user_path, index=False)
+        als_model.itemFactors.toPandas().to_parquet(item_path, index=False)
+
+        input_example = pd.DataFrame({"userId": [1], "k": [10]})
+        mlflow.pyfunc.log_model(
+            artifact_path=artifact_path,
+            python_model=MovielensAlsPyFunc(),
+            code_paths=[str(pyfunc_module)],
+            artifacts={
+                "user_factors": str(user_path),
+                "item_factors": str(item_path),
+            },
+            pip_requirements=[
+                "mlflow==2.18.0",
+                "pandas",
+                "numpy",
+                "pyarrow",
+            ],
+            input_example=input_example,
+        )
+    _assert_mlmodel_logged(artifact_path)
+    print(f"  → ALS (pyfunc) в MLflow: artifact '{artifact_path}'")
+
+
+def deploy_movielens_als_to_mlflow(
+    als_model: Any,
+    *,
+    metrics: dict[str, float],
+    params: dict[str, Any] | None = None,
+    experiment_name: str = MOVIELENS_EXPERIMENT,
+    run_name: str = "movielens-als",
+    model_name: str = MOVIELENS_REGISTERED_MODEL_NAME,
+    target_stage: str = "Production",
+) -> str:
+    """Лог run → Registry → Production; затем перезапустите mlflow-serve-movielens."""
+    setup_mlflow(experiment_name=experiment_name)
+    with mlflow.start_run(run_name=run_name) as run:
+        log_movielens_als_model(als_model, metrics=metrics, params=params)
+        run_id = run.info.run_id
+    register_and_promote_run(
+        run_id, model_name=model_name, target_stage=target_stage
+    )
+    print(
+        f"Model Registry: {model_name} → {target_stage}\n"
+        f"  docker compose up -d mlflow-serve-movielens --force-recreate\n"
+        f"  serve: {movielens_serve_host_url()}/invocations"
+    )
+    return run_id
+
+
 def log_sklearn_spell_model(
     sk_model: Any,
     *,
@@ -675,12 +797,6 @@ def log_sklearn_spell_model(
         input_example=X_ex[:1],
     )
     print(f"  → модель сохранена в MLflow: artifact '{artifact_path}'")
-
-
-REGISTERED_MODEL_NAME = "spells-classifier"
-ALPACA_REGISTERED_MODEL_NAME = "alpaca-causal-lm"
-DEEPSEEK_REGISTERED_MODEL_NAME = "deepseek-causal-lm"
-COMPARE_METRICS = ("test_f1", "test_roc_auc", "accuracy_real", "holdout_f1")
 
 
 def list_classifier_runs(

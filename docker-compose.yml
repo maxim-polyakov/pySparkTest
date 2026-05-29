@@ -16,6 +16,9 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__WEBSERVER__SECRET_KEY: pysparktest_airflow_dev
+    # 4 worker'а на 1.5 GB → gunicorn падает, UI на :8081 недоступен (Windows/Docker)
+    AIRFLOW__WEBSERVER__WORKERS: "2"
+    AIRFLOW__WEBSERVER__WORKER_TIMEOUT: "180"
     AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
   volumes:
     - ./airflow/dags:/opt/airflow/dags
@@ -173,6 +176,7 @@ services:
     volumes:
       - ./hadoop/scripts/register-spells-table.sh:/scripts/register-spells-table.sh:ro
       - ./hadoop/scripts/register-alpaca-table.sh:/scripts/register-alpaca-table.sh:ro
+      - ./hadoop/scripts/register-movielens-tables.sh:/scripts/register-movielens-tables.sh:ro
     command: /opt/hive/bin/hive --service hiveserver2
     environment:
       HIVE_CORE_CONF_javax_jdo_option_ConnectionURL: "jdbc:postgresql://hive-metastore-postgresql/metastore"
@@ -234,6 +238,7 @@ services:
       - MLFLOW_SERVE_URI=http://mlflow-serve:5001
       - MLFLOW_ALPACA_SERVE_URI=http://mlflow-serve-alpaca:5002
       - MLFLOW_DEEPSEEK_SERVE_URI=http://mlflow-serve-deepseek:5003
+      - MLFLOW_MOVIELENS_SERVE_URI=http://mlflow-serve-movielens:5004
       # PyTorch/BLAS CPU parallelism for LLM fine-tuning (i7-8700K: 6C/12T)
       - OMP_NUM_THREADS=10
       - MKL_NUM_THREADS=10
@@ -269,6 +274,8 @@ services:
       mlflow-serve-alpaca:
         condition: service_started
       mlflow-serve-deepseek:
+        condition: service_started
+      mlflow-serve-movielens:
         condition: service_started
     healthcheck:
       test:
@@ -355,6 +362,44 @@ services:
       timeout: 15s
       retries: 30
       start_period: 300s
+    restart: unless-stopped
+
+  mlflow-serve-movielens:
+    image: ghcr.io/mlflow/mlflow:v2.18.0
+    container_name: mlflow-serve-movielens
+    hostname: mlflow-serve-movielens
+    mem_limit: 1024m
+    memswap_limit: 1024m
+    user: "0:0"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MLFLOW_MODEL_NAME=movielens-als
+      - MLFLOW_SERVE_STAGE=Production
+      - MLFLOW_SERVE_PORT=5004
+      - MLFLOW_SERVE_PIP=pandas numpy pyarrow
+      - PYTHONPATH=/serve-code
+    entrypoint: /bin/bash
+    command: ["/scripts/mlflow-serve-entrypoint.sh"]
+    volumes:
+      - ./hadoop/scripts/mlflow-serve-entrypoint.sh:/scripts/mlflow-serve-entrypoint.sh:ro
+      - ./notebooks:/serve-code:ro
+    ports:
+      - "5004:5004"
+    depends_on:
+      mlflow:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5004/health', timeout=5)",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 180s
     restart: unless-stopped
 
   mlflow-serve-deepseek:
@@ -487,8 +532,8 @@ services:
     <<: *airflow-common
     container_name: airflow-webserver
     hostname: airflow-webserver
-    mem_limit: 1536m
-    memswap_limit: 1536m
+    mem_limit: 2048m
+    memswap_limit: 2048m
     command: webserver
     ports:
       - "8081:8080"
@@ -497,7 +542,7 @@ services:
       interval: 15s
       timeout: 10s
       retries: 10
-      start_period: 60s
+      start_period: 120s
     depends_on:
       airflow-init:
         condition: service_completed_successfully

@@ -4,3 +4,4 @@
 /notebooks/__pycache__
 /notebooks/models/alpaca-distilgpt2
 /notebooks/models/alpaca-deepseek
+/airflow/dags/__pycache__
