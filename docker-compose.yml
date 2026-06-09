@@ -419,6 +419,7 @@ services:
       - ALPACA_LOCAL_MODEL_DIR=/models/alpaca-deepseek
       - HF_TRUST_REMOTE_CODE=1
       - DEEPSEEK_SERVE_PLAIN=1
+      - PYTHONPATH=/serve-code
       # DEEPSEEK_SERVE_DEBUG=1 — печать промпта в логах serve
       # DEEPSEEK_SERVE_PLAIN=0 — safe chat вместо plain (после restart disk jinja может быть старым)
     entrypoint: /bin/bash
@@ -428,6 +429,7 @@ services:
       - ./hadoop/scripts/alpaca-local-serve.py:/scripts/alpaca-local-serve.py:ro
       - ./hadoop/scripts/alpaca_prompt_utils.py:/scripts/alpaca_prompt_utils.py:ro
       - ./notebooks/models:/models:ro
+      - ./notebooks:/serve-code:ro
     ports:
       - "5003:5003"
     depends_on:
@@ -479,7 +481,13 @@ services:
     ports:
       - "5000:5000"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:5000/health"]
+      test:
+        [
+          "CMD",
+          "python3",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=5)",
+        ]
       interval: 10s
       timeout: 5s
       retries: 12

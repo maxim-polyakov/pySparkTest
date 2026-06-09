@@ -1,5 +1,6 @@
 #!/bin/bash
 set -euo pipefail
+# Keep LF line endings: Linux bash reads CRLF as "pipefail\r" and exits.
 
 MODEL_NAME="${MLFLOW_MODEL_NAME:-spells-classifier}"
 TRACKING_URI="${MLFLOW_TRACKING_URI:-http://mlflow:5000}"
