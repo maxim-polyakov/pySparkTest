@@ -12,7 +12,7 @@ import mlflow
 import numpy as np
 from mlflow.models import infer_signature
 
-__version__ = "12"  # bump при изменении API (для importlib.reload в ноутбуке)
+__version__ = "13"  # bump при изменении API (для importlib.reload в ноутбуке)
 
 REFUSAL_PATTERNS = (
     r"i['\u2019]?m sorry",
@@ -30,6 +30,7 @@ MLFLOW_ARTIFACT_ROOT = "mlflow-artifacts:/"
 
 REGISTERED_MODEL_NAME = "spells-classifier"
 ALPACA_REGISTERED_MODEL_NAME = "alpaca-causal-lm"
+DISTILGPT_REGISTERED_MODEL_NAME = "distilgpt-causal-lm"
 DEEPSEEK_REGISTERED_MODEL_NAME = "deepseek-causal-lm"
 MOVIELENS_REGISTERED_MODEL_NAME = "movielens-als"
 MOVIELENS_EXPERIMENT = "movielens_recommendations"
@@ -367,6 +368,55 @@ def predict_alpaca_via_serve(
     )
 
 
+def get_distilgpt_serve_uri() -> str:
+    return os.environ.get(
+        "MLFLOW_DISTILGPT_SERVE_URI",
+        os.environ.get("MLFLOW_ALPACA_SERVE_URI", "http://mlflow-serve-alpaca:5002"),
+    )
+
+
+def distilgpt_serve_ui_url() -> str:
+    return alpaca_serve_ui_url()
+
+
+def resolve_distilgpt_serve_uri(*, timeout: float = 5.0) -> str:
+    return _resolve_lm_serve_uri(
+        env_var="MLFLOW_DISTILGPT_SERVE_URI",
+        default_uri=get_distilgpt_serve_uri(),
+        docker_host="mlflow-serve-alpaca",
+        host_port=5002,
+        label="distilgpt",
+        timeout=timeout,
+    )
+
+
+def wait_for_distilgpt_serve(*, max_wait_sec: int = 600, poll_sec: int = 10) -> str:
+    return _wait_for_lm_serve(
+        resolve_distilgpt_serve_uri,
+        max_wait_sec=max_wait_sec,
+        poll_sec=poll_sec,
+        log_container="mlflow-serve-alpaca",
+    )
+
+
+def predict_distilgpt_via_serve(
+    prompt: str,
+    *,
+    serve_uri: str | None = None,
+    max_new_tokens: int = 80,
+    timeout: float = 300.0,
+) -> str:
+    """Генерация через DistilGPT serve на порту 5002."""
+    return _predict_lm_via_serve(
+        prompt,
+        resolve_fn=resolve_distilgpt_serve_uri,
+        serve_uri=serve_uri,
+        max_new_tokens=max_new_tokens,
+        timeout=timeout,
+        log_container="mlflow-serve-alpaca",
+    )
+
+
 def is_refusal_response(text: str) -> bool:
     import re
 
@@ -555,6 +605,15 @@ def evaluate_deployed_alpaca(
 ) -> dict[str, float]:
     """Оценка distilgpt2 serve (:5002)."""
     kwargs.setdefault("predict_fn", predict_alpaca_via_serve)
+    return evaluate_deployed_via_serve(prompt_reference_pairs, **kwargs)
+
+
+def evaluate_deployed_distilgpt(
+    prompt_reference_pairs: list[tuple[str, str]],
+    **kwargs: Any,
+) -> dict[str, float]:
+    """Оценка DistilGPT serve (:5002)."""
+    kwargs.setdefault("predict_fn", predict_distilgpt_via_serve)
     return evaluate_deployed_via_serve(prompt_reference_pairs, **kwargs)
 
 
@@ -948,6 +1007,27 @@ def register_alpaca_from_local(
     """Перелогировать локальную папку в MLflow и зарегистрировать (если serve падал без MLmodel)."""
     setup_mlflow(experiment_name=experiment_name)
     with mlflow.start_run(run_name="alpaca-causal-lm-reregister") as run:
+        log_alpaca_causal_lm(model_dir=model_dir)
+        run_id = run.info.run_id
+    register_and_promote_run(
+        run_id, model_name=model_name, target_stage=target_stage
+    )
+    print(
+        "Перезапустите serve: docker compose up -d mlflow-serve-alpaca --force-recreate"
+    )
+    return run_id
+
+
+def register_distilgpt_from_local(
+    model_dir: str,
+    *,
+    experiment_name: str = "distilgpt_alpaca_finetune",
+    target_stage: str = "Production",
+    model_name: str = DISTILGPT_REGISTERED_MODEL_NAME,
+) -> str:
+    """Перелогировать локальную DistilGPT-папку в Registry и поднять serve на :5002."""
+    setup_mlflow(experiment_name=experiment_name)
+    with mlflow.start_run(run_name="distilgpt-causal-lm-reregister") as run:
         log_alpaca_causal_lm(model_dir=model_dir)
         run_id = run.info.run_id
     register_and_promote_run(

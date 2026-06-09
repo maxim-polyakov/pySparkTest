@@ -96,6 +96,7 @@ DEFAULT_DEEPSEEK_OUTPUT_DIR = "/home/jovyan/work/models/alpaca-deepseek"
 
 # Имена в MLflow Registry (дублируем здесь — не зависим от версии mlflow_utils в kernel)
 ALPACA_REGISTERED_MODEL_NAME = "alpaca-causal-lm"
+DISTILGPT_REGISTERED_MODEL_NAME = "distilgpt-causal-lm"
 DEEPSEEK_REGISTERED_MODEL_NAME = "deepseek-causal-lm"
 
 
@@ -141,7 +142,7 @@ def default_train_profiles(
             label="distilgpt2",
             model_name=DEFAULT_DISTILGPT2_MODEL,
             output_dir=DEFAULT_DISTILGPT2_OUTPUT_DIR,
-            register_model_name=ALPACA_REGISTERED_MODEL_NAME,
+            register_model_name=DISTILGPT_REGISTERED_MODEL_NAME,
             max_steps=max_steps,
             batch_size=2,
             learning_rate=5e-5,
@@ -688,6 +689,8 @@ def train_causal_lm(
         reg_name = register_model_name
     elif "deepseek" in model_name.lower():
         reg_name = DEEPSEEK_REGISTERED_MODEL_NAME
+    elif "distilgpt" in model_name.lower():
+        reg_name = DISTILGPT_REGISTERED_MODEL_NAME
     else:
         reg_name = ALPACA_REGISTERED_MODEL_NAME
     if register_stage:

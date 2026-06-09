@@ -237,6 +237,7 @@ services:
       - MLFLOW_TRACKING_URI=http://mlflow:5000
       - MLFLOW_SERVE_URI=http://mlflow-serve:5001
       - MLFLOW_ALPACA_SERVE_URI=http://mlflow-serve-alpaca:5002
+      - MLFLOW_DISTILGPT_SERVE_URI=http://mlflow-serve-alpaca:5002
       - MLFLOW_DEEPSEEK_SERVE_URI=http://mlflow-serve-deepseek:5003
       - MLFLOW_MOVIELENS_SERVE_URI=http://mlflow-serve-movielens:5004
       # PyTorch/BLAS CPU parallelism for LLM fine-tuning (i7-8700K: 6C/12T)
@@ -335,7 +336,7 @@ services:
     user: "0:0"
     environment:
       - MLFLOW_TRACKING_URI=http://mlflow:5000
-      - MLFLOW_MODEL_NAME=alpaca-causal-lm
+      - MLFLOW_MODEL_NAME=distilgpt-causal-lm
       - MLFLOW_SERVE_STAGE=Production
       - MLFLOW_SERVE_PORT=5002
       - ALPACA_LOCAL_MODEL_DIR=/models/alpaca-distilgpt2

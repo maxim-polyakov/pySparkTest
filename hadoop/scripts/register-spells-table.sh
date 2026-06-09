@@ -12,14 +12,15 @@ export HIVE_DB HIVE_TABLE HDFS_PATH
 CREATE DATABASE IF NOT EXISTS ${HIVE_DB};
 DROP TABLE IF EXISTS ${HIVE_DB}.${HIVE_TABLE};
 CREATE EXTERNAL TABLE ${HIVE_DB}.${HIVE_TABLE} (
-    id BIGINT,
-    damage INT,
+    id INT,
     description STRING,
     image_url STRING,
     mana_cost INT,
     name STRING,
+    sound_url STRING,
+    animation_url STRING,
     play_effect_url STRING,
-    sound_url STRING
+    damage INT
 )
 STORED AS PARQUET
 LOCATION '${HDFS_PATH}';
