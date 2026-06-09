@@ -249,6 +249,7 @@ services:
       - GIT_PYTHON_REFRESH=quiet
       - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
       - USE_TF=0
+      - HF_HUB_DISABLE_XET=1
     command:
       - jupyter
       - lab

@@ -42,7 +42,7 @@ RUN python3 -m pip install --no-cache-dir --ignore-installed \
     rouge-score \
     sacrebleu \
     && python3 -m pip install --no-cache-dir --ignore-installed \
-    torch --index-url ${TORCH_INDEX_URL}
+    torch torchvision --index-url ${TORCH_INDEX_URL}
 
 RUN python3 -c "import pyspark, os; os.symlink(os.path.dirname(pyspark.__file__), '/opt/spark', target_is_directory=True)"
 

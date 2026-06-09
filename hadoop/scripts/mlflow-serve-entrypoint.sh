@@ -93,8 +93,16 @@ fi
 LOCAL_DIR="${ALPACA_LOCAL_MODEL_DIR:-}"
 export MODEL_URI
 
+has_local_hf_model() {
+  local dir="$1"
+  [ -f "$dir/config.json" ] || \
+    [ -f "$dir/adapter_config.json" ] || \
+    [ -f "$dir/merged/config.json" ] || \
+    ls "$dir"/checkpoint-*/adapter_model.safetensors >/dev/null 2>&1
+}
+
 # Быстрый старт: локальные веса (Registry часто без MLmodel + долгая загрузка checkpoint-*)
-if [ -n "$LOCAL_DIR" ] && [ -f "$LOCAL_DIR/config.json" ]; then
+if [ -n "$LOCAL_DIR" ] && [ -d "$LOCAL_DIR" ] && has_local_hf_model "$LOCAL_DIR"; then
   if [ "${ALPACA_SERVE_PREFER_LOCAL:-1}" != "0" ]; then
     echo "Using local HF weights at $LOCAL_DIR (ALPACA_SERVE_PREFER_LOCAL=0 → попробовать Registry)"
     export ALPACA_LOCAL_MODEL_DIR="$LOCAL_DIR"

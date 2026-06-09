@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir \
     "accelerate>=1.1.0" \
     "flask" \
     "torch" \
+    "torchvision" \
     --extra-index-url https://download.pytorch.org/whl/cpu
 
 ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python

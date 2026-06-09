@@ -9,6 +9,7 @@ from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
 os.environ.setdefault("USE_TF", "0")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 TEXT_COLS = ("instruction", "input", "output", "text")
 
@@ -474,9 +475,12 @@ def _load_causal_lm(
         except ImportError:
             pass
 
+    print(f"model: loading {model_name} with {load_kw}", flush=True)
     model = AutoModelForCausalLM.from_pretrained(model_name, **load_kw)
+    print(f"model: loaded {model.__class__.__name__}", flush=True)
     if gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         model.gradient_checkpointing_enable()
+        print("model: gradient checkpointing enabled", flush=True)
 
     if use_lora:
         try:
@@ -494,6 +498,7 @@ def _load_causal_lm(
         )
         model = get_peft_model(model, lora_cfg)
         model.print_trainable_parameters()
+        print("model: LoRA adapter attached", flush=True)
 
     return model
 
@@ -565,11 +570,15 @@ def train_causal_lm(
             f"interop={torch.get_num_interop_threads()}",
         )
 
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
+    print(f"tokenizer: loading {model_name}", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(
         model_name, trust_remote_code=trust_remote_code
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    print(f"tokenizer: loaded {tokenizer.__class__.__name__}", flush=True)
 
     model = _load_causal_lm(
         model_name,

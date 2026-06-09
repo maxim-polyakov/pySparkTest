@@ -111,6 +111,8 @@ class LocalCausalLmPyFunc(mlflow.pyfunc.PythonModel):
         self._model.eval()
 
     def predict(self, context, model_input):  # noqa: ANN001, ANN201
+        import sys
+
         import pandas as pd
         import torch
 
@@ -126,7 +128,26 @@ class LocalCausalLmPyFunc(mlflow.pyfunc.PythonModel):
 
         outputs: list[str] = []
         for prompt in prompts:
-            inputs = self._tokenizer(prompt, return_tensors="pt").to(self._device)
+            sys.path.insert(0, "/scripts")
+            try:
+                from alpaca_prompt_utils import (
+                    decode_new_tokens,
+                    tokenize_generation_prompt,
+                    trim_alpaca_completion,
+                )
+
+                inputs, enc_mode, encoded_prompt = tokenize_generation_prompt(
+                    self._tokenizer,
+                    prompt,
+                    base_model_name=getattr(self._tokenizer, "name_or_path", ""),
+                )
+            except ImportError:
+                inputs = self._tokenizer(prompt, return_tensors="pt")
+                enc_mode = "plain"
+                encoded_prompt = prompt
+                decode_new_tokens = None
+                trim_alpaca_completion = None
+            inputs = inputs.to(self._device)
             with torch.no_grad():
                 out = self._model.generate(
                     **inputs,
@@ -136,12 +157,24 @@ class LocalCausalLmPyFunc(mlflow.pyfunc.PythonModel):
                     repetition_penalty=1.15,
                     no_repeat_ngram_size=3,
                 )
-            text = self._tokenizer.decode(out[0], skip_special_tokens=True)
-            if text.startswith(prompt):
-                text = text[len(prompt) :].lstrip()
-            for stop in ("\n\n###", "\n### Instruction", "\n### Input"):
-                if stop in text:
-                    text = text.split(stop, 1)[0].rstrip()
+            if decode_new_tokens is not None:
+                text = decode_new_tokens(
+                    self._tokenizer,
+                    out[0],
+                    inputs,
+                    mode=enc_mode,
+                    encoded_prompt=encoded_prompt,
+                )
+            else:
+                text = self._tokenizer.decode(out[0], skip_special_tokens=True)
+                if text.startswith(prompt):
+                    text = text[len(prompt) :].lstrip()
+            if trim_alpaca_completion is not None:
+                text = trim_alpaca_completion(text)
+            else:
+                for stop in ("\n\n###", "\n### Instruction", "\n### Input"):
+                    if stop in text:
+                        text = text.split(stop, 1)[0].rstrip()
             outputs.append(text)
         return outputs
 
