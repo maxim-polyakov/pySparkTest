@@ -304,6 +304,7 @@ services:
     command: ["/scripts/mlflow-serve-entrypoint.sh"]
     volumes:
       - ./hadoop/scripts/mlflow-serve-entrypoint.sh:/scripts/mlflow-serve-entrypoint.sh:ro
+      - mlflow_data:/mlflow:ro
     ports:
       - "5001:5001"
     depends_on:
@@ -345,6 +346,7 @@ services:
       - ./hadoop/scripts/alpaca-local-serve.py:/scripts/alpaca-local-serve.py:ro
       - ./hadoop/scripts/alpaca_prompt_utils.py:/scripts/alpaca_prompt_utils.py:ro
       - ./notebooks/models:/models:ro
+      - mlflow_data:/mlflow:ro
     ports:
       - "5002:5002"
     depends_on:
@@ -383,6 +385,7 @@ services:
     volumes:
       - ./hadoop/scripts/mlflow-serve-entrypoint.sh:/scripts/mlflow-serve-entrypoint.sh:ro
       - ./notebooks:/serve-code:ro
+      - mlflow_data:/mlflow:ro
     ports:
       - "5004:5004"
     depends_on:
@@ -430,6 +433,7 @@ services:
       - ./hadoop/scripts/alpaca_prompt_utils.py:/scripts/alpaca_prompt_utils.py:ro
       - ./notebooks/models:/models:ro
       - ./notebooks:/serve-code:ro
+      - mlflow_data:/mlflow:ro
     ports:
       - "5003:5003"
     depends_on:

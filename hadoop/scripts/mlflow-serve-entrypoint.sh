@@ -59,6 +59,37 @@ sys.exit(1)
 PY
 )
 
+REGISTRY_SOURCE=$(python3 <<'PY'
+import os
+import sys
+from mlflow.tracking import MlflowClient
+
+name = os.environ["MLFLOW_MODEL_NAME"]
+stages = [s.strip() for s in os.environ.get("MLFLOW_SERVE_STAGE", "Production,Staging").split(",") if s.strip()]
+client = MlflowClient()
+for stage in stages:
+    versions = client.get_latest_versions(name, stages=[stage])
+    if versions:
+        print(versions[0].source)
+        sys.exit(0)
+sys.exit(1)
+PY
+)
+
+REGISTRY_LOCAL_DIR=""
+case "$REGISTRY_SOURCE" in
+  mlflow-artifacts:/*)
+    REGISTRY_LOCAL_DIR="/mlflow/artifacts/${REGISTRY_SOURCE#mlflow-artifacts:/}"
+    ;;
+  /mlflow/*)
+    REGISTRY_LOCAL_DIR="$REGISTRY_SOURCE"
+    ;;
+esac
+if [ -n "$REGISTRY_LOCAL_DIR" ]; then
+  echo "Registry source: $REGISTRY_SOURCE"
+  echo "Registry local path: $REGISTRY_LOCAL_DIR"
+fi
+
 LOCAL_DIR="${ALPACA_LOCAL_MODEL_DIR:-}"
 export MODEL_URI
 
@@ -67,6 +98,14 @@ if [ -n "$LOCAL_DIR" ] && [ -f "$LOCAL_DIR/config.json" ]; then
   if [ "${ALPACA_SERVE_PREFER_LOCAL:-1}" != "0" ]; then
     echo "Using local HF weights at $LOCAL_DIR (ALPACA_SERVE_PREFER_LOCAL=0 → попробовать Registry)"
     export ALPACA_LOCAL_MODEL_DIR="$LOCAL_DIR"
+    exec python3 /scripts/alpaca-local-serve.py
+  fi
+fi
+
+if [ -n "$REGISTRY_LOCAL_DIR" ] && [ -d "$REGISTRY_LOCAL_DIR" ] && [ ! -f "$REGISTRY_LOCAL_DIR/MLmodel" ]; then
+  if [ -f "$REGISTRY_LOCAL_DIR/config.json" ] || [ -f "$REGISTRY_LOCAL_DIR/adapter_config.json" ] || ls "$REGISTRY_LOCAL_DIR"/checkpoint-*/adapter_model.safetensors >/dev/null 2>&1; then
+    echo "Registry artifact has no MLmodel; serving it as local HF/LoRA folder."
+    export ALPACA_LOCAL_MODEL_DIR="$REGISTRY_LOCAL_DIR"
     exec python3 /scripts/alpaca-local-serve.py
   fi
 fi
