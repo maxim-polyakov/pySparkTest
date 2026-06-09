@@ -816,7 +816,6 @@ def log_movielens_als_model(
         als_model.userFactors.toPandas().to_parquet(user_path, index=False)
         als_model.itemFactors.toPandas().to_parquet(item_path, index=False)
 
-        input_example = pd.DataFrame({"userId": [1], "k": [10]})
         mlflow.pyfunc.log_model(
             artifact_path=artifact_path,
             python_model=MovielensAlsPyFunc(),
@@ -831,7 +830,6 @@ def log_movielens_als_model(
                 "numpy",
                 "pyarrow",
             ],
-            input_example=input_example,
         )
     _assert_mlmodel_logged(artifact_path)
     print(f"  → ALS (pyfunc) в MLflow: artifact '{artifact_path}'")
